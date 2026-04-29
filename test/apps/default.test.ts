@@ -1,52 +1,103 @@
-import express from 'express'
-import request from 'supertest'
-import { Application } from '../../src'
-import appFn = require('../../src/apps/default')
-import { createApp } from './helper'
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-describe('default app', () => {
-  let server: express.Application
-  let app: Application
+import { pino } from "pino";
+import getPort from "get-port";
+import { describe, expect, it } from "vitest";
 
-  beforeEach(async () => {
-    app = createApp(appFn)
-    server = express()
-    server.use(app.router)
-  })
+import { Probot, Server } from "../../src/index.js";
+import { defaultApp as defaultAppHandler } from "../../src/apps/default.js";
 
-  describe('GET /probot', () => {
-    it('returns a 200 response', () => {
-      return request(server).get('/probot').expect(200)
-    })
+import { probotView } from "../../src/views/probot.js";
+import { MockLoggerTarget } from "../utils.js";
 
-    describe('get info from package.json', () => {
-      let cwd: string
-      beforeEach(() => {
-        cwd = process.cwd()
-      })
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
-      it('returns the correct HTML with values', async () => {
-        const actual = await request(server).get('/probot').expect(200)
-        expect(actual.text).toMatch('Welcome to probot')
-        expect(actual.text).toMatch('A framework for building GitHub Apps')
-        expect(actual.text).toMatch(/v\d+\.\d+\.\d+/)
-      })
+describe("default app", () => {
+  async function instantiateServer(cwd = process.cwd()) {
+    const server = new Server({
+      Probot: Probot.defaults({
+        appId: 1,
+        privateKey: "private key",
+      }),
+      port: await getPort(),
+      log: pino(new MockLoggerTarget()),
+      cwd,
+    });
 
-      it('returns the correct HTML without values', async () => {
-        process.chdir(__dirname)
-        const actual = await request(server).get('/probot').expect(200)
-        expect(actual.text).toMatch('Welcome to your Probot App')
-      })
+    await server.loadHandlerFactory(defaultAppHandler);
 
-      afterEach(() => {
-        process.chdir(cwd)
-      })
-    })
-  })
+    return server;
+  }
 
-  describe('GET /', () => {
-    it('redirects to /probot', () => {
-      return request(server).get('/').expect(302).expect('location', '/probot')
-    })
-  })
-})
+  describe("GET /probot", () => {
+    it("returns a 200 response", async () => {
+      const server = await instantiateServer();
+
+      await server.start();
+
+      const response = await fetch(
+        `http://${server.host}:${server.port}/probot`,
+      );
+
+      expect(response.status).toBe(200);
+      await server.stop();
+    });
+
+    describe("get info from package.json", () => {
+      it("returns the correct HTML with values", async () => {
+        const server = await instantiateServer();
+
+        await server.start();
+
+        const response = await fetch(
+          `http://${server.host}:${server.port}/probot`,
+        );
+
+        expect(response.status).toBe(200);
+
+        expect(await response.text()).toBe(
+          probotView({
+            name: "probot",
+            description:
+              "A framework for building GitHub Apps to automate and improve your workflow",
+            version: "0.0.0-development",
+          }),
+        );
+
+        await server.stop();
+      });
+
+      it("returns the correct HTML without values", async () => {
+        const server = await instantiateServer(__dirname);
+
+        await server.start();
+
+        const response = await fetch(
+          `http://${server.host}:${server.port}/probot`,
+        );
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(probotView({}));
+
+        await server.stop();
+      });
+    });
+  });
+
+  // Redirect does not work because webhooks middleware is using root path
+  describe("GET /", () => {
+    it("redirects to /probot", async () => {
+      const server = await instantiateServer(__dirname);
+      await server.start();
+
+      const response = await fetch(`http://${server.host}:${server.port}/`, {
+        redirect: "manual",
+      });
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("location")).toBe("/probot");
+
+      await server.stop();
+    });
+  });
+});
